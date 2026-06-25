@@ -1,0 +1,12 @@
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.release.build-override]
+opt-level = 3
+
+[build]
+rustflags = ["-C", "target-cpu=native"]

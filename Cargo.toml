@@ -1,0 +1,13 @@
+[package]
+name = "chessEngine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+polyglot-book-rs = "0.1.0"
+pyrrhic-rs = "0.2.0"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
