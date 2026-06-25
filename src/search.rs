@@ -1254,11 +1254,12 @@ fn negamax(
         let null_undo = board.do_null_move();
         ss.nnue.copy_ply(ply + 1);
         ss.position_history.push(board.hash);
+        let reduced_depth = (depth - 1 - r).max(1);
         let null_score = -negamax(
             board,
             ss,
             tt,
-            depth - 1 - r,
+            reduced_depth,
             ply + 1,
             -beta,
             -beta + 1,
@@ -1280,7 +1281,7 @@ fn negamax(
     // =========================================================================
 
     if !is_pv && !in_check && depth >= 3 && static_eval >= beta + if improving { 120 } else { 90 } {
-        let prob_depth = depth - 4;
+        let prob_depth = (depth - 4).max(1);
         if prob_depth >= 1 {
             let prob_beta = beta + 1;
             let us = board.side_to_move;
