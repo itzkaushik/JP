@@ -25,7 +25,7 @@ use pyrrhic_rs::{DtzProbeValue, TableBases, WdlProbeResult};
 use crate::board::Board;
 use crate::eval::{self, DRAW_SCORE, INFINITY, MATE_VALUE, is_mate_score, mate_in, mated_in};
 use crate::tt::{NodeBound, TranspositionTable, adjust_mate_for_tt, adjust_mate_from_tt};
-use crate::types::{BitBoard, Move, MoveList, Piece, Square};
+use crate::types::{BitBoard, Color, Move, MoveList, Piece, Square};
 
 // =============================================================================
 // LMR table (precomputed)
@@ -53,6 +53,7 @@ fn lmr_reduction(depth: usize, move_count: usize) -> i32 {
 // reduce less aggressively ("improving node" idea).
 const IMPROVING_EVAL_MARGIN_1: i32 = 40;
 const IMPROVING_EVAL_MARGIN_2: i32 = 80;
+const CHECK_EXTENSION_DEPTH_CAP: i32 = 8;
 
 // =============================================================================
 // MVV-LVA (Most Valuable Victim – Least Valuable Attacker)
@@ -122,6 +123,15 @@ fn see(board: &Board, mv: Move) -> i32 {
         occ = BitBoard(occ.0 & !(1u64 << ep_cap_sq.0));
     }
 
+    let bishops = board.pieces[0][Piece::Bishop.index()] | board.pieces[1][Piece::Bishop.index()];
+    let rooks = board.pieces[0][Piece::Rook.index()] | board.pieces[1][Piece::Rook.index()];
+    let queens = board.pieces[0][Piece::Queen.index()] | board.pieces[1][Piece::Queen.index()];
+    let diag_sliders = bishops | queens;
+    let orth_sliders = rooks | queens;
+
+    // Start with full attacker set once, then maintain it incrementally.
+    let mut attackers = get_all_attackers(board, to, occ) & occ;
+
     let mut current_piece_value = SEE_VALUES[attacker_piece.index()];
     let mut side = attacker_color.flip(); // Opponent captures next
 
@@ -141,8 +151,7 @@ fn see(board: &Board, mv: Move) -> i32 {
         }
 
         // Find cheapest attacker for `side` on square `to`
-        let their_pieces = board.by_color[side.index()];
-        let attackers_to_sq = get_all_attackers(board, to, occ) & their_pieces & occ;
+        let attackers_to_sq = attackers & board.by_color[side.index()];
 
         if attackers_to_sq.is_empty() {
             break; // No more attackers — exchange is over
@@ -155,6 +164,13 @@ fn see(board: &Board, mv: Move) -> i32 {
 
         // Remove this piece from occupancy (it moves to `to`)
         occ = BitBoard(occ.0 & !(1u64 << cheapest_sq.0));
+
+        // Update attackers incrementally: keep present attackers, then add
+        // newly-uncovered slider x-rays through the updated occupancy.
+        attackers &= occ;
+        attackers |= attacks::bishop_attacks(to, occ) & diag_sliders;
+        attackers |= attacks::rook_attacks(to, occ) & orth_sliders;
+        attackers &= occ;
 
         // Switch sides
         side = side.flip();
@@ -424,6 +440,181 @@ fn is_draw(board: &Board, history: &[u64]) -> bool {
 }
 
 // =============================================================================
+// Fast legality prefilter (pins + check evasion masks)
+// =============================================================================
+
+#[inline]
+fn aligned_direction(from: Square, to: Square) -> Option<(i8, i8)> {
+    let df = to.file() as i8 - from.file() as i8;
+    let dr = to.rank() as i8 - from.rank() as i8;
+
+    if df == 0 && dr != 0 {
+        Some((0, dr.signum()))
+    } else if dr == 0 && df != 0 {
+        Some((df.signum(), 0))
+    } else if df.abs() == dr.abs() && df != 0 {
+        Some((df.signum(), dr.signum()))
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn ray_between_inclusive(from: Square, to: Square) -> BitBoard {
+    let Some((df, dr)) = aligned_direction(from, to) else {
+        return BitBoard::EMPTY;
+    };
+
+    let mut mask = BitBoard::EMPTY;
+    let mut file = from.file() as i8 + df;
+    let mut rank = from.rank() as i8 + dr;
+
+    while file >= 0 && file < 8 && rank >= 0 && rank < 8 {
+        let sq = Square::new(file as u8, rank as u8);
+        mask |= sq.bit();
+        if sq == to {
+            break;
+        }
+        file += df;
+        rank += dr;
+    }
+
+    mask
+}
+
+#[inline]
+fn is_move_on_pin_ray(king_sq: Square, from: Square, to: Square) -> bool {
+    if king_sq.file() == from.file() {
+        return to.file() == king_sq.file();
+    }
+    if king_sq.rank() == from.rank() {
+        return to.rank() == king_sq.rank();
+    }
+
+    let df1 = from.file() as i8 - king_sq.file() as i8;
+    let dr1 = from.rank() as i8 - king_sq.rank() as i8;
+    if df1.abs() != dr1.abs() {
+        return false;
+    }
+
+    let df2 = to.file() as i8 - king_sq.file() as i8;
+    let dr2 = to.rank() as i8 - king_sq.rank() as i8;
+    if df2.abs() != dr2.abs() {
+        return false;
+    }
+
+    // Same diagonal family through king (NW-SE or NE-SW).
+    (df1.signum() == dr1.signum()) == (df2.signum() == dr2.signum())
+}
+
+#[inline]
+fn compute_king_checkers_pins(board: &Board, us: Color) -> (Square, BitBoard, BitBoard) {
+    let king_bb = board.pieces[us.index()][Piece::King.index()];
+    if king_bb.is_empty() {
+        return (Square::A1, BitBoard::EMPTY, BitBoard::EMPTY);
+    }
+
+    let king_sq = king_bb.lsb();
+    let them = us.flip();
+    let occ = board.occupied;
+
+    let mut checkers = BitBoard::EMPTY;
+    checkers |= crate::attacks::pawn_attacks(us, king_sq) & board.pieces[them.index()][Piece::Pawn.index()];
+    checkers |= crate::attacks::knight_attacks(king_sq) & board.pieces[them.index()][Piece::Knight.index()];
+    checkers |= crate::attacks::king_attacks(king_sq) & board.pieces[them.index()][Piece::King.index()];
+    checkers |= crate::attacks::bishop_attacks(king_sq, occ)
+        & (board.pieces[them.index()][Piece::Bishop.index()]
+            | board.pieces[them.index()][Piece::Queen.index()]);
+    checkers |= crate::attacks::rook_attacks(king_sq, occ)
+        & (board.pieces[them.index()][Piece::Rook.index()]
+            | board.pieces[them.index()][Piece::Queen.index()]);
+
+    let mut pinned = BitBoard::EMPTY;
+    const DIRS: [(i8, i8); 8] = [
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (1, -1),
+        (-1, 1),
+        (-1, -1),
+    ];
+
+    for (df, dr) in DIRS {
+        let mut file = king_sq.file() as i8 + df;
+        let mut rank = king_sq.rank() as i8 + dr;
+        let mut first_ally: Option<Square> = None;
+
+        while file >= 0 && file < 8 && rank >= 0 && rank < 8 {
+            let sq = Square::new(file as u8, rank as u8);
+            if let Some((c, p)) = board.piece_at(sq) {
+                if c == us {
+                    if first_ally.is_none() {
+                        first_ally = Some(sq);
+                    } else {
+                        break;
+                    }
+                } else {
+                    if let Some(ally_sq) = first_ally {
+                        let diagonal = df != 0 && dr != 0;
+                        let pins = if diagonal {
+                            p == Piece::Bishop || p == Piece::Queen
+                        } else {
+                            p == Piece::Rook || p == Piece::Queen
+                        };
+                        if pins {
+                            pinned |= ally_sq.bit();
+                        }
+                    }
+                    break;
+                }
+            }
+
+            file += df;
+            rank += dr;
+        }
+    }
+
+    (king_sq, checkers, pinned)
+}
+
+#[inline]
+fn evasion_mask_for_single_checker(king_sq: Square, checker_sq: Square) -> BitBoard {
+    ray_between_inclusive(king_sq, checker_sq)
+}
+
+#[inline]
+fn pseudo_move_might_be_legal(
+    mv: Move,
+    king_sq: Square,
+    check_count: u32,
+    evasion_mask: BitBoard,
+    pinned: BitBoard,
+) -> bool {
+    let from = mv.from_sq();
+    if from == king_sq {
+        return true;
+    }
+
+    if check_count >= 2 {
+        return false;
+    }
+
+    // In single check, non-king evasions must capture checker or block line.
+    // Keep en-passant unfiltered here to avoid false negatives in edge cases.
+    if check_count == 1 && !mv.is_en_passant() && (evasion_mask & mv.to_sq().bit()).is_empty() {
+        return false;
+    }
+
+    if (pinned & from.bit()).is_not_empty() && !is_move_on_pin_ray(king_sq, from, mv.to_sq()) {
+        return false;
+    }
+
+    true
+}
+
+// =============================================================================
 // PV table
 // =============================================================================
 
@@ -462,17 +653,34 @@ fn score_moves(
         if mv.pack_16() == tt_move.pack_16() && tt_move != Move::NULL {
             scores[i] = TT_MOVE_SCORE;
         } else if mv.is_capture() || mv.is_en_passant() {
-            // Use SEE to classify captures as good or bad
-            let see_val = see(board, mv);
-            if see_val >= 0 {
-                // Good capture: base + SEE value (ensures winning captures sort highest)
-                scores[i] = GOOD_CAPTURE_BASE + see_val;
+            let capture_score = if let Some((_, attacker)) = board.piece_at(mv.from_sq()) {
+                let victim = if mv.is_en_passant() {
+                    Piece::Pawn
+                } else if let Some((_, victim)) = board.piece_at(mv.to_sq()) {
+                    victim
+                } else {
+                    Piece::Pawn
+                };
+
+                let mut score = mvv_lva_score(attacker, victim);
+                if mv.is_promotion() {
+                    if let Some(promo) = mv.promotion_piece() {
+                        score +=
+                            MVV_LVA_VALUES[promo.index()] - MVV_LVA_VALUES[Piece::Pawn.index()];
+                    }
+                }
+                score
             } else {
-                // Bad/losing capture: sort below quiet moves
-                scores[i] = BAD_CAPTURE_BASE + see_val;
-            }
+                0
+            };
+
+            scores[i] = GOOD_CAPTURE_BASE + capture_score;
         } else if mv.is_promotion() {
-            scores[i] = QUEEN_PROMO_SCORE;
+            if let Some(promo) = mv.promotion_piece() {
+                scores[i] = QUEEN_PROMO_SCORE + MVV_LVA_VALUES[promo.index()];
+            } else {
+                scores[i] = QUEEN_PROMO_SCORE;
+            }
         } else if mv.pack_16() == killers[0].pack_16() && killers[0] != Move::NULL {
             scores[i] = KILLER1_SCORE;
         } else if mv.pack_16() == killers[1].pack_16() && killers[1] != Move::NULL {
@@ -858,8 +1066,8 @@ fn negamax(
     let is_pv = (beta - alpha) > 1;
     let in_check = board.in_check(board.side_to_move);
 
-    // Check extension: don't reduce search when in check
-    if in_check {
+    // Cap check extensions to avoid long forcing-check explosion lines.
+    if in_check && depth <= CHECK_EXTENSION_DEPTH_CAP {
         depth += 1;
     }
 
@@ -870,7 +1078,7 @@ fn negamax(
 
     // Quiescence at horizon
     if depth <= 0 {
-        return quiescence(board, ss, ply, alpha, beta);
+        return quiescence(board, ss, tt, ply, alpha, beta);
     }
 
     // Max ply guard
@@ -1015,7 +1223,7 @@ fn negamax(
     if !is_pv && !in_check && depth >= 1 && depth <= 3 {
         let razor_margin = 200 * depth + if improving { 40 } else { 0 };
         if static_eval + razor_margin < alpha {
-            return quiescence(board, ss, ply, alpha, beta);
+            return quiescence(board, ss, tt, ply, alpha, beta);
         }
     }
 
@@ -1143,6 +1351,13 @@ fn negamax(
     let mut best_move = Move::NULL;
     let mut legal_moves = 0usize;
     let mut quiets_tried: Vec<Move> = Vec::new();
+    let (king_sq, checkers, pinned) = compute_king_checkers_pins(board, us);
+    let check_count = checkers.popcount();
+    let evasion_mask = if check_count == 1 {
+        evasion_mask_for_single_checker(king_sq, checkers.lsb())
+    } else {
+        BitBoard::EMPTY
+    };
 
     // LMP move count thresholds by depth
     const LMP_THRESHOLD: [usize; 9] = [0, 5, 10, 20, 40, 60, 80, 100, 120];
@@ -1154,6 +1369,11 @@ fn negamax(
     for move_idx in 0..moves.len() {
         pick_next(&mut moves, &mut scores, move_idx);
         let mv = moves[move_idx];
+
+        if !pseudo_move_might_be_legal(mv, king_sq, check_count, evasion_mask, pinned) {
+            continue;
+        }
+
         let capture_see = if mv.is_capture() || mv.is_en_passant() {
             Some(see(board, mv))
         } else {
@@ -1402,15 +1622,28 @@ fn negamax(
 fn quiescence(
     board: &mut Board,
     ss: &mut SearchState,
+    tt: &TranspositionTable,
     ply: usize,
     mut alpha: i32,
     beta: i32,
 ) -> i32 {
+    let original_alpha = alpha;
+
     ss.nodes += 1;
     ss.sel_depth = ss.sel_depth.max(ply as u8);
 
     if ss.is_stopped() {
         return 0;
+    }
+
+    if let Some(entry) = tt.probe(board.hash) {
+        let tt_score = adjust_mate_from_tt(entry.score as i32, ply);
+        match NodeBound::from_u8(entry.bound) {
+            NodeBound::Exact => return tt_score,
+            NodeBound::Lower if tt_score >= beta => return tt_score,
+            NodeBound::Upper if tt_score <= alpha => return tt_score,
+            _ => {}
+        }
     }
 
     let in_check = board.in_check(board.side_to_move);
@@ -1444,16 +1677,34 @@ fn quiescence(
     score_captures(board, &moves, &mut scores);
 
     let mut legal_moves = 0usize;
+    let mut best_move = Move::NULL;
     let us = board.side_to_move;
+    let (king_sq, checkers, pinned) = compute_king_checkers_pins(board, us);
+    let check_count = checkers.popcount();
+    let evasion_mask = if check_count == 1 {
+        evasion_mask_for_single_checker(king_sq, checkers.lsb())
+    } else {
+        BitBoard::EMPTY
+    };
 
     for move_idx in 0..moves.len() {
         pick_next(&mut moves, &mut scores, move_idx);
         let mv = moves[move_idx];
 
+        if !pseudo_move_might_be_legal(mv, king_sq, check_count, evasion_mask, pinned) {
+            continue;
+        }
+
         // Delta pruning: skip captures that can't possibly raise alpha
         if !in_check && mv.is_capture() && !mv.is_en_passant() {
             if let Some((_, victim)) = board.piece_at(mv.to_sq()) {
-                if stand_pat + eval::PIECE_VALUE[victim.index()] + 200 < alpha {
+                let mut delta = eval::PIECE_VALUE[victim.index()];
+                if mv.is_promotion() {
+                    if let Some(promo) = mv.promotion_piece() {
+                        delta += eval::PIECE_VALUE[promo.index()] - eval::PIECE_VALUE[Piece::Pawn.index()];
+                    }
+                }
+                if stand_pat + delta + 200 < alpha {
                     continue;
                 }
             }
@@ -1475,21 +1726,50 @@ fn quiescence(
         ss.nnue.apply_move(ply + 1, board, undo);
         legal_moves += 1;
 
-        let score = -quiescence(board, ss, ply + 1, -beta, -alpha);
+        let score = -quiescence(board, ss, tt, ply + 1, -beta, -alpha);
         board.undo_move(undo);
 
         if score >= beta {
+            tt.store(
+                board.hash,
+                adjust_mate_for_tt(score, ply) as i16,
+                mv,
+                0,
+                NodeBound::Lower,
+            );
             return score;
         }
         if score > alpha {
             alpha = score;
+            best_move = mv;
         }
     }
 
     // In check with no legal moves = checkmate
     if in_check && legal_moves == 0 {
-        return mated_in(ply);
+        let score = mated_in(ply);
+        tt.store(
+            board.hash,
+            adjust_mate_for_tt(score, ply) as i16,
+            Move::NULL,
+            0,
+            NodeBound::Exact,
+        );
+        return score;
     }
+
+    let bound = if alpha > original_alpha {
+        NodeBound::Exact
+    } else {
+        NodeBound::Upper
+    };
+    tt.store(
+        board.hash,
+        adjust_mate_for_tt(alpha, ply) as i16,
+        best_move,
+        0,
+        bound,
+    );
 
     alpha
 }

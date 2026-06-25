@@ -371,7 +371,8 @@ pub fn uci_loop() {
 
                 // --- Main thread (thread 0) ---
                 search_handle = Some(thread::spawn(move || {
-                    let mut ss = SearchState::new(stop_clone, syzygy_clone);
+                    let stop_for_search = Arc::clone(&stop_clone);
+                    let mut ss = SearchState::new(stop_for_search, syzygy_clone);
                     ss.thread_id = 0;
                     ss.max_depth = max_depth;
                     ss.soft_limit_ms = soft_ms;
@@ -394,6 +395,7 @@ pub fn uci_loop() {
                         }
                     };
 
+                    stop_clone.store(true, Ordering::SeqCst);
                     println!("bestmove {}", best_uci);
                     io::stdout().flush().unwrap();
                 }));

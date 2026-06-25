@@ -365,7 +365,29 @@ impl Board {
                 Color::White => Square::new(from.file(), from.rank() + 1),
                 Color::Black => Square::new(from.file(), from.rank() - 1),
             };
-            self.en_passant_sq = Some(ep_sq);
+
+            // Only keep EP state when the opponent has an adjacent pawn
+            // that can legally capture onto the EP square.
+            let to_file = to.file();
+            let to_rank = to.rank();
+            let mut ep_relevant = false;
+
+            if to_file > 0 {
+                let left = Square::new(to_file - 1, to_rank);
+                if self.piece_at(left) == Some((them, Piece::Pawn)) {
+                    ep_relevant = true;
+                }
+            }
+            if !ep_relevant && to_file < 7 {
+                let right = Square::new(to_file + 1, to_rank);
+                if self.piece_at(right) == Some((them, Piece::Pawn)) {
+                    ep_relevant = true;
+                }
+            }
+
+            if ep_relevant {
+                self.en_passant_sq = Some(ep_sq);
+            }
         }
 
         self.castling_rights.0 &= CASTLING_RIGHTS_MASK[from.0 as usize];
@@ -934,8 +956,19 @@ mod tests {
             new_board.piece_at(Square(28)),
             Some((Color::White, Piece::Pawn))
         );
-        assert_eq!(new_board.en_passant_sq, Some(Square(20))); // e3
+        // No adjacent black pawn can capture e3, so EP square is omitted.
+        assert_eq!(new_board.en_passant_sq, None);
         assert_eq!(new_board.halfmove_clock, 0); // pawn move resets
+    }
+
+    #[test]
+    fn test_make_move_double_push_sets_ep_when_relevant() {
+        let board = Board::from_fen("8/8/8/8/3p4/8/4P3/4K2k w - - 0 1").unwrap();
+        // e2-e4 (double push), black pawn on d4 can capture e3 en passant.
+        let mv = Move::new(Square::E2, Square::E4, Move::FLAG_DOUBLE_PUSH);
+        let new_board = board.make_move(mv);
+
+        assert_eq!(new_board.en_passant_sq, Some(Square(20))); // e3
     }
 
     #[test]
