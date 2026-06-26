@@ -2024,10 +2024,9 @@ mod tests {
             best != Move::NULL,
             "Should find a move from starting position"
         );
-        // Score should be roughly symmetric (relaxed to 2000 temporarily since 
-        // the old nn.bin is scaled incorrectly for the new /64 divisor)
+        // Score should be roughly symmetric
         assert!(
-            ss.best_score.abs() < 2000,
+            ss.best_score.abs() < 200,
             "Starting position should be roughly equal"
         );
     }
