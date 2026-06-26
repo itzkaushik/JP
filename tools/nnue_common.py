@@ -86,8 +86,7 @@ def sigmoid_wdl(x, scale: float = SCALE):
 
 def wdl_loss(predictions, game_results):
   """Binary cross-entropy style loss on WDL probabilities."""
-  pred_wdl = sigmoid_wdl(predictions)
-  return ((pred_wdl - game_results) ** 2).mean()
+  return torch.nn.functional.binary_cross_entropy_with_logits(predictions / SCALE, game_results)
 
 
 def export_weights(model: ChessNNUE, output_file: str) -> None:

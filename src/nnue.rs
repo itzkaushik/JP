@@ -404,7 +404,7 @@ pub fn forward_scalar(acc: &NnueAccumulator, side_to_move: Color) -> i32 {
         let mut sum = p.l3_biases[j];
         for i in 0..L2_SIZE {
             // De-quantize L2 output, apply CReLU, re-quantize
-            let activated = (l2_out[i] / QA).clamp(0, QA);
+            let activated = (l2_out[i] / QB).clamp(0, QA);
             sum += activated * p.l3_weights[j][i] as i32;
         }
         l3_out[j] = sum;
@@ -413,7 +413,7 @@ pub fn forward_scalar(acc: &NnueAccumulator, side_to_move: Color) -> i32 {
     // --- Output: CReLU(L3 output / (QA * QB)) × out_weights + out_bias ---
     let mut output = p.out_bias;
     for i in 0..L3_SIZE {
-        let activated = (l3_out[i] / QA).clamp(0, QA);
+        let activated = (l3_out[i] / QB).clamp(0, QA);
         output += activated * p.out_weights[i] as i32;
     }
 
@@ -479,7 +479,7 @@ pub unsafe fn forward_avx2(acc: &NnueAccumulator, side_to_move: Color) -> i32 {
     for j in 0..L3_SIZE {
         let mut sum = p.l3_biases[j];
         for i in 0..L2_SIZE {
-            let activated = (l2_out[i] / QA).clamp(0, QA);
+            let activated = (l2_out[i] / QB).clamp(0, QA);
             sum += activated * p.l3_weights[j][i] as i32;
         }
         l3_out[j] = sum;
@@ -487,7 +487,7 @@ pub unsafe fn forward_avx2(acc: &NnueAccumulator, side_to_move: Color) -> i32 {
 
     let mut output = p.out_bias;
     for i in 0..L3_SIZE {
-        let activated = (l3_out[i] / QA).clamp(0, QA);
+        let activated = (l3_out[i] / QB).clamp(0, QA);
         output += activated * p.out_weights[i] as i32;
     }
 
@@ -553,7 +553,7 @@ pub unsafe fn forward_avx512vnni(acc: &NnueAccumulator, side_to_move: Color) -> 
     for j in 0..L3_SIZE {
         let mut sum = p.l3_biases[j];
         for i in 0..L2_SIZE {
-            let activated = (l2_out[i] / QA).clamp(0, QA);
+            let activated = (l2_out[i] / QB).clamp(0, QA);
             sum += activated * p.l3_weights[j][i] as i32;
         }
         l3_out[j] = sum;
@@ -561,7 +561,7 @@ pub unsafe fn forward_avx512vnni(acc: &NnueAccumulator, side_to_move: Color) -> 
 
     let mut output = p.out_bias;
     for i in 0..L3_SIZE {
-        let activated = (l3_out[i] / QA).clamp(0, QA);
+        let activated = (l3_out[i] / QB).clamp(0, QA);
         output += activated * p.out_weights[i] as i32;
     }
 

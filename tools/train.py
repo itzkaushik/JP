@@ -326,10 +326,7 @@ class ChessNNUE(nn.Module):
 class ChessDataset(Dataset):
     def __init__(self, data_file: str):
         print(f"Loading training data from {data_file}...")
-        self.white_features = []
-        self.black_features = []
-        self.stm = []
-        self.scores = []
+        self.samples = []
         
         with open(data_file, 'rb') as f:
             n_entries = struct.unpack('<I', f.read(4))[0]
@@ -346,35 +343,40 @@ class ChessDataset(Dataset):
                 stm = struct.unpack('<B', f.read(1))[0]
                 score = struct.unpack('<f', f.read(4))[0]
                 
-                # Convert to dense tensors
-                w = torch.zeros(INPUT_SIZE)
-                b = torch.zeros(INPUT_SIZE)
-                for idx in w_indices:
-                    w[idx] = 1.0
-                for idx in b_indices:
-                    b[idx] = 1.0
-                
-                self.white_features.append(w)
-                self.black_features.append(b)
-                self.stm.append(stm)
-                self.scores.append(score)
+                self.samples.append((w_indices, b_indices, stm, score))
                 
                 if (i + 1) % 500_000 == 0:
                     print(f"  Loaded {i+1:,}/{n_entries:,} positions")
         
-        self.white_features = torch.stack(self.white_features)
-        self.black_features = torch.stack(self.black_features)
-        self.stm = torch.tensor(self.stm, dtype=torch.float32)
-        self.scores = torch.tensor(self.scores, dtype=torch.float32)
-        
-        print(f"Loaded {len(self.scores):,} positions")
+        print(f"Loaded {len(self.samples):,} positions")
     
     def __len__(self):
-        return len(self.scores)
+        return len(self.samples)
     
     def __getitem__(self, idx):
-        return (self.white_features[idx], self.black_features[idx], 
-                self.stm[idx], self.scores[idx])
+        return self.samples[idx]
+
+def collate_batch(batch):
+    batch_size = len(batch)
+    w_dense = torch.zeros(batch_size, INPUT_SIZE, dtype=torch.float32)
+    b_dense = torch.zeros(batch_size, INPUT_SIZE, dtype=torch.float32)
+    stm_list = []
+    scores_list = []
+
+    for i, (w_feats, b_feats, stm, score) in enumerate(batch):
+        if w_feats:
+            w_dense[i, w_feats] = 1.0
+        if b_feats:
+            b_dense[i, b_feats] = 1.0
+        stm_list.append(stm)
+        scores_list.append(score)
+
+    return (
+        w_dense,
+        b_dense,
+        torch.tensor(stm_list, dtype=torch.float32),
+        torch.tensor(scores_list, dtype=torch.float32),
+    )
 
 # =============================================================================
 # Training
@@ -388,7 +390,7 @@ def train_network(data_file: str, output_file: str, epochs: int = 30,
     
     dataset = ChessDataset(data_file)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, 
-                       num_workers=0, pin_memory=True)
+                       collate_fn=collate_batch, num_workers=0, pin_memory=True)
     
     model = ChessNNUE().to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)

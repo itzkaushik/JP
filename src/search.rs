@@ -268,7 +268,7 @@ pub struct SearchState {
 
     // --- Per-search heuristics ---
     pub killers: [[Move; 2]; 128],
-    pub history: [[i32; 64]; 64],
+    pub history: [[[i32; 64]; 64]; 2],
     pub counter_moves: [[Move; 64]; 64],
     /// Continuation history: [prev_piece][prev_to][to]
     pub cont_history: [[[i32; 64]; 64]; 6],
@@ -312,7 +312,7 @@ impl SearchState {
             syzygy,
             thread_id: 0,
             killers: [[Move::NULL; 2]; 128],
-            history: [[0i32; 64]; 64],
+            history: [[[0i32; 64]; 64]; 2],
             counter_moves: [[Move::NULL; 64]; 64],
             cont_history: [[[0i32; 64]; 64]; 6],
             nodes: 0,
@@ -359,30 +359,36 @@ impl SearchState {
         }
     }
 
-    fn update_history(&mut self, mv: Move, depth: i32) {
+    fn update_history(&mut self, us: crate::types::Color, mv: Move, depth: i32) {
         let from = mv.from_sq().0 as usize;
         let to = mv.to_sq().0 as usize;
+        let c = us.index();
         let bonus = depth * depth;
-        self.history[from][to] += bonus;
-        if self.history[from][to].abs() > 32_767 {
+        self.history[c][from][to] += bonus;
+        if self.history[c][from][to].abs() > 32_767 {
             // Gravity: halve all values to prevent overflow
-            for row in &mut self.history {
-                for v in row {
-                    *v /= 2;
+            for plane in &mut self.history {
+                for row in plane {
+                    for v in row {
+                        *v /= 2;
+                    }
                 }
             }
         }
     }
 
-    fn penalize_history(&mut self, mv: Move, depth: i32) {
+    fn penalize_history(&mut self, us: crate::types::Color, mv: Move, depth: i32) {
         let from = mv.from_sq().0 as usize;
         let to = mv.to_sq().0 as usize;
+        let c = us.index();
         let penalty = depth * depth;
-        self.history[from][to] -= penalty;
-        if self.history[from][to].abs() > 32_767 {
-            for row in &mut self.history {
-                for v in row {
-                    *v /= 2;
+        self.history[c][from][to] -= penalty;
+        if self.history[c][from][to].abs() > 32_767 {
+            for plane in &mut self.history {
+                for row in plane {
+                    for v in row {
+                        *v /= 2;
+                    }
                 }
             }
         }
@@ -642,7 +648,7 @@ fn score_moves(
     scores: &mut [i32; 256],
     tt_move: Move,
     killers: &[Move; 2],
-    history: &[[i32; 64]; 64],
+    history: &[[[i32; 64]; 64]; 2],
     counter_mv: Move,
     cont_hist: &[[[i32; 64]; 64]; 6],
     prev_move: Move,
@@ -688,7 +694,7 @@ fn score_moves(
         } else if mv.pack_16() == counter_mv.pack_16() && counter_mv != Move::NULL {
             scores[i] = COUNTER_MOVE_SCORE;
         } else {
-            let mut h = history[mv.from_sq().0 as usize][mv.to_sq().0 as usize];
+            let mut h = history[board.side_to_move.index()][mv.from_sq().0 as usize][mv.to_sq().0 as usize];
             if prev_move != Move::NULL {
                 if let Some((_, prev_piece)) = board.piece_at(prev_move.to_sq()) {
                     let ch = cont_hist[prev_piece.index()][prev_move.to_sq().0 as usize]
@@ -1105,7 +1111,7 @@ fn negamax(
         if !in_check && depth >= 1 && board.occupied.popcount() <= tb.max_pieces() {
             let halfmove = board.halfmove_clock as u32;
             let ep = board.en_passant_sq.map(|s| s.0 as u32).unwrap_or(0);
-            if halfmove == 0 && (board.castling_rights.0 == 0) {
+            if board.castling_rights.0 == 0 {
                 if let Ok(wdl) = tb.probe_wdl(
                     board.by_color[0].0,
                     board.by_color[1].0,
@@ -1443,7 +1449,7 @@ fn negamax(
         }
 
         if !is_pv && !in_check && is_quiet && !child_in_check && depth <= HISTORY_PRUNE_DEPTH_MAX {
-            let hist = ss.history[mv.from_sq().0 as usize][mv.to_sq().0 as usize];
+            let hist = ss.history[us.index()][mv.from_sq().0 as usize][mv.to_sq().0 as usize];
             let late_quiet = legal_moves > (8 + (depth as usize * 4));
             if hist <= HISTORY_PRUNE_SCORE
                 && late_quiet
@@ -1477,7 +1483,7 @@ fn negamax(
 
             if legal_moves >= 3 && depth >= 3 && !in_check && !child_in_check && is_quiet {
                 reduction = lmr_reduction(depth as usize, legal_moves);
-                let hist = ss.history[mv.from_sq().0 as usize][mv.to_sq().0 as usize];
+                let hist = ss.history[us.index()][mv.from_sq().0 as usize][mv.to_sq().0 as usize];
                 if hist < 0 {
                     reduction += 1;
                 }
@@ -1567,7 +1573,7 @@ fn negamax(
                 if score >= beta {
                     if is_quiet {
                         ss.update_killers(mv, ply);
-                        ss.update_history(mv, depth);
+                        ss.update_history(us, mv, depth);
                         ss.update_cont_history(board, prev_move, mv, depth);
                         if prev_move != Move::NULL {
                             ss.counter_moves[prev_move.from_sq().0 as usize]
@@ -1575,7 +1581,7 @@ fn negamax(
                         }
                         for &q in &quiets_tried {
                             if q != mv {
-                                ss.penalize_history(q, depth);
+                                ss.penalize_history(us, q, depth);
                             }
                         }
                     }
