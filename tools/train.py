@@ -469,8 +469,8 @@ def export_weights(model: ChessNNUE, output_file: str):
         l2_weight_q = np.clip(np.round(l2_weight * QB), -128, 127).astype(np.int8)
         l2_bias_q = np.clip(np.round(l2_bias * QA * QB), -2147483648, 2147483647).astype(np.int32)
         
-        for i in range(L1_SIZE * 2):
-            for j in range(L2_SIZE):
+        for j in range(L2_SIZE):
+            for i in range(L1_SIZE * 2):
                 f.write(struct.pack('<b', int(l2_weight_q[j, i])))
         
         for j in range(L2_SIZE):
@@ -483,8 +483,8 @@ def export_weights(model: ChessNNUE, output_file: str):
         l3_weight_q = np.clip(np.round(l3_weight * QB), -128, 127).astype(np.int8)
         l3_bias_q = np.clip(np.round(l3_bias * QA * QB), -2147483648, 2147483647).astype(np.int32)
         
-        for i in range(L2_SIZE):
-            for j in range(L3_SIZE):
+        for j in range(L3_SIZE):
+            for i in range(L2_SIZE):
                 f.write(struct.pack('<b', int(l3_weight_q[j, i])))
         
         for j in range(L3_SIZE):
